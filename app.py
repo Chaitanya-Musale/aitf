@@ -4,29 +4,89 @@ Enhanced UI, comprehensive explanations, and bug fixes
 """
 
 import gradio as gr
-        from report_generator import ReportGenerator
-    except ImportError as e:
-        print(f"Failed to import modules: {e}")
+import logging
+import json
+import traceback
+import tempfile
+from datetime import datetime
+from typing import Dict, List, Optional, Any, Tuple
+import pandas as pd
 
-
-        raise
+# Import custom modules
+try:
+    from cv_parser import CVParser
+    from claim_extractor import ClaimExtractor
+    from evidence_validator import EvidenceValidator
+    from red_flag_detector import RedFlagDetector
+    from gemini_client import GeminiClient
+    from sota_checker import SOTAChecker
+    from evidence_heatmap import EvidenceHeatmap
+    from report_generator import ReportGenerator
+except ImportError as e:
+    print(f"Failed to import modules: {e}")
+    raise
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Global session storage
+current_session = {
+    'initialized': False,
+    'gemini_client': None,
+    'api_key': None,
+    'last_analysis': None
+}
+
+def initialize_session(api_key: str, mock_mode: bool = False) -> Tuple[bool, str]:
+    """
+    Initialize Gemini session with API key
+
+    Args:
+        api_key: Google AI API key
+        mock_mode: Use mock mode for testing (not implemented)
+
+    Returns:
+        Tuple of (success, message)
+    """
+    global current_session
+
+    try:
+        if not api_key or api_key.strip() == "":
+            return False, "❌ Please enter a valid API key"
+
+        # Initialize Gemini client
+        logger.info("Initializing Gemini client...")
+        gemini_client = GeminiClient(api_key=api_key.strip())
+
+        # Test connection
+        test_response = gemini_client.generate_content(
+            "Say 'OK' if you can read this",
+            generation_config={'temperature': 0.1, 'max_output_tokens': 10}
+        )
+
+        if not test_response or not test_response.text:
+            return False, "❌ Failed to connect to Gemini API"
+
+        # Store in session
+        current_session['gemini_client'] = gemini_client
+        current_session['api_key'] = api_key
+        current_session['initialized'] = True
+
+        logger.info("Session initialized successfully")
+        return True, "✅ Session initialized successfully! You can now upload and analyze resumes."
+
+    except Exception as e:
         logger.error(f"Session initialization failed: {e}")
-        return False, f"❌ Initialization failed: {str(e)}"
+        return False, f"❌ Initialization failed: {str(e)}\n\nPlease check your API key at https://makersuite.google.com/app/apikey"
 
 def generate_comprehensive_analysis_display(analysis_results: Dict) -> str:
     """Generate comprehensive analysis display with all factors we consider"""
 
-    
     # Fix consistency score if it exceeds 100
     consistency_score = min(100, analysis_results.get('consistency_score', 0))
     analysis_results['consistency_score'] = consistency_score
-    
+
     display = f"""
 <div style="font-family: 'Segoe UI', Arial, sans-serif;">
 
@@ -174,15 +234,15 @@ def generate_detailed_red_flag_analysis(red_flags: List[Dict]) -> str:
 <p>The resume appears internally consistent with reasonable claims.</p>
 </div>
 """
-    
+
     # Group by severity
     critical = [f for f in red_flags if f.get('severity') == 'critical']
     high = [f for f in red_flags if f.get('severity') == 'high']
     medium = [f for f in red_flags if f.get('severity') == 'medium']
     low = [f for f in red_flags if f.get('severity') == 'low']
-    
+
     html = ""
-    
+
     if critical:
         html += """
 <div style="background: #ffebee; border-left: 4px solid #f44336; padding: 15px; margin: 15px 0;">
@@ -191,7 +251,7 @@ def generate_detailed_red_flag_analysis(red_flags: List[Dict]) -> str:
         for flag in critical:
             html += generate_single_flag_html(flag)
         html += "</div>"
-    
+
     if high:
         html += """
 <div style="background: #fff3e0; border-left: 4px solid #ff9800; padding: 15px; margin: 15px 0;">
@@ -200,7 +260,7 @@ def generate_detailed_red_flag_analysis(red_flags: List[Dict]) -> str:
         for flag in high:
             html += generate_single_flag_html(flag)
         html += "</div>"
-    
+
     if medium:
         html += """
 <div style="background: #fffde7; border-left: 4px solid #ffc107; padding: 15px; margin: 15px 0;">
@@ -209,7 +269,7 @@ def generate_detailed_red_flag_analysis(red_flags: List[Dict]) -> str:
         for flag in medium[:3]:  # Limit to top 3
             html += generate_single_flag_html(flag)
         html += "</div>"
-    
+
     return html
 
 def generate_single_flag_html(flag: Dict) -> str:
@@ -246,14 +306,14 @@ def generate_single_flag_html(flag: Dict) -> str:
             'action': 'Ask about team composition and individual contribution'
         }
     }
-    
+
     cat_info = category_explanations.get(flag.get('category', ''), {
         'icon': '⚠️',
         'why': 'This pattern needs verification',
         'impact': 'May affect credibility',
         'action': 'Verify during interview'
     })
-    
+
     return f"""
 <div style="margin: 10px 0; padding: 10px; background: rgba(255,255,255,0.5); border-radius: 5px;">
     <h4 style="margin: 5px 0;">{cat_info['icon']} {flag.get('description', 'Issue detected')}</h4>
@@ -270,10 +330,10 @@ def generate_single_flag_html(flag: Dict) -> str:
 
 def generate_score_calculation_details(results: Dict) -> str:
     """Generate detailed score calculation breakdown"""
-    
+
     # Ensure consistency score doesn't exceed 100
     consistency_score = min(100, results.get('consistency_score', 0))
-    
+
     html = f"""
 <div style="background: #f5f5f5; padding: 20px; border-radius: 10px; margin: 20px 0;">
 
@@ -296,7 +356,7 @@ def generate_score_calculation_details(results: Dict) -> str:
     <td style="padding: 10px; text-align: center;">✓</td>
 </tr>
 """
-    
+
     # Deductions
     if results.get('unverified_claims', 0) > results.get('total_claims', 1) * 0.5:
         deduction = -20
@@ -307,7 +367,7 @@ def generate_score_calculation_details(results: Dict) -> str:
     <td style="padding: 10px; text-align: center;">Applied</td>
 </tr>
 """
-    
+
     red_flag_deduction = results.get('total_red_flags', 0) * -5
     if red_flag_deduction < 0:
         html += f"""
@@ -317,7 +377,7 @@ def generate_score_calculation_details(results: Dict) -> str:
     <td style="padding: 10px; text-align: center;">Applied</td>
 </tr>
 """
-    
+
     if results.get('claim_metrics', {}).get('buzzword_density', 0) > 0.1:
         html += """
 <tr style="background: #ffebee;">
@@ -326,7 +386,7 @@ def generate_score_calculation_details(results: Dict) -> str:
     <td style="padding: 10px; text-align: center;">Applied</td>
 </tr>
 """
-    
+
     # Positive factors
     if results.get('verified_claims', 0) > results.get('total_claims', 1) * 0.7:
         html += """
@@ -336,7 +396,7 @@ def generate_score_calculation_details(results: Dict) -> str:
     <td style="padding: 10px; text-align: center;">Applied</td>
 </tr>
 """
-    
+
     html += f"""
 </table>
 
@@ -377,7 +437,7 @@ def generate_score_calculation_details(results: Dict) -> str:
 def get_check_status(results: Dict, check_type: str) -> str:
     """Get status for specific check"""
     red_flags = results.get('red_flags', [])
-    
+
     if check_type == 'timeline':
         issues = [f for f in red_flags if f.get('category') == 'timeline']
         return "❌ Failed" if issues else "✅ Passed"
@@ -385,14 +445,13 @@ def get_check_status(results: Dict, check_type: str) -> str:
         issues = [f for f in red_flags if 'tech' in f.get('description', '').lower()]
         return "❌ Failed" if issues else "✅ Passed"
     elif check_type == 'skill_usage':
-        # This would need actual data from validation
         return "⚠️ Partial"
     else:
         return "✅ Passed"
 
 def generate_enhanced_claim_analysis(claims: List[Dict], validations: List[Dict]) -> str:
     """Generate enhanced claim-by-claim analysis with better UI"""
-    
+
     html = """
 <div style="font-family: 'Segoe UI', Arial, sans-serif;">
 
@@ -403,17 +462,17 @@ def generate_enhanced_claim_analysis(claims: List[Dict], validations: List[Dict]
 </div>
 
 """.format(total=len(claims))
-    
+
     # Group claims by category
     categories = {}
     for i, claim in enumerate(claims[:20]):  # Limit to top 20
         cat = claim.get('category', 'other')
         if cat not in categories:
             categories[cat] = []
-        
+
         validation = validations[i] if i < len(validations) else {}
         categories[cat].append((claim, validation))
-    
+
     # Display by category
     category_icons = {
         'work_experience': '💼',
@@ -422,25 +481,25 @@ def generate_enhanced_claim_analysis(claims: List[Dict], validations: List[Dict]
         'research': '🔬',
         'education': '🎓'
     }
-    
+
     for category, items in categories.items():
         icon = category_icons.get(category, '📌')
         html += f"""
 <h2>{icon} {category.replace('_', ' ').title()} ({len(items)} claims)</h2>
 """
-        
-        for claim, validation in items:
+
+        for claim, validation in items[:5]:  # Limit to 5 per category
             html += generate_single_claim_analysis(claim, validation)
-    
+
     html += "</div>"
     return html
 
 def generate_single_claim_analysis(claim: Dict, validation: Dict) -> str:
     """Generate analysis for a single claim with detailed explanation"""
-    
+
     status = validation.get('verification_status', 'unknown')
     score = validation.get('final_evidence_score', 0)
-    
+
     # Determine status color and icon
     if status == 'verified':
         color = '#4CAF50'
@@ -457,13 +516,16 @@ def generate_single_claim_analysis(claim: Dict, validation: Dict) -> str:
         bg_color = '#ffebee'
         icon = '❌'
         status_text = 'UNVERIFIED'
-    
+
+    claim_text = claim.get('claim_text', 'Unknown claim')
+    display_text = claim_text[:100] + "..." if len(claim_text) > 100 else claim_text
+
     html = f"""
 <div style="margin: 15px 0; padding: 15px; background: {bg_color}; border-left: 4px solid {color}; border-radius: 5px;">
     <h3 style="margin: 0 0 10px 0; color: #333;">
-        {icon} {claim.get('claim_text', 'Unknown claim')[:100]}...
+        {icon} {display_text}
     </h3>
-    
+
     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0;">
         <div>
             <strong>Status:</strong> <span style="color: {color}; font-weight: bold;">{status_text}</span><br>
@@ -476,79 +538,14 @@ def generate_single_claim_analysis(claim: Dict, validation: Dict) -> str:
             <strong>Has Links:</strong> {'Yes' if claim.get('links_artifacts') else 'No'}
         </div>
     </div>
-    
-    <div style="background: white; padding: 10px; border-radius: 3px; margin-top: 10px;">
-        <strong>Analysis:</strong>
-"""
-    
-    # Provide detailed explanation
-    if status == 'verified':
-        html += """
-        <ul style="margin: 5px 0;">
-            <li>✓ Supporting evidence found in resume</li>
-            <li>✓ Claim is specific and measurable</li>
-"""
-        if validation.get('link_integrity', {}).get('valid_links'):
-            html += "<li>✓ External links validated successfully</li>"
-        html += "</ul>"
-        
-    elif status == 'partial':
-        html += """
-        <ul style="margin: 5px 0;">
-            <li>⚠️ Some evidence found but incomplete</li>
-            <li>⚠️ Needs more specific details or metrics</li>
-"""
-        missing = []
-        if not claim.get('quantifiable_metrics'):
-            missing.append("Specific metrics/numbers")
-        if not claim.get('links_artifacts'):
-            missing.append("Portfolio or proof links")
-        
-        if missing:
-            html += f"<li>⚠️ Missing: {', '.join(missing)}</li>"
-        html += "</ul>"
-        
-    else:  # unverified
-        html += """
-        <ul style="margin: 5px 0;">
-            <li>❌ No supporting evidence found</li>
-"""
-        reasons = []
-        if not claim.get('quantifiable_metrics'):
-            reasons.append("No specific metrics provided")
-        if not claim.get('links_artifacts'):
-            reasons.append("No portfolio/GitHub links")
-        if claim.get('verifiability_level') == 'low':
-            reasons.append("Claim is too vague to verify")
-            
-        for reason in reasons:
-            html += f"<li>❌ {reason}</li>"
-        html += "</ul>"
-    
-    # Add improvement suggestion
-    html += """
-        <div style="margin-top: 10px; padding: 10px; background: #f5f5f5; border-radius: 3px;">
-            <strong>💡 How to improve:</strong> 
-"""
-    
-    if not claim.get('quantifiable_metrics'):
-        html += "Add specific metrics (percentages, numbers, timeframes). "
-    if not claim.get('links_artifacts'):
-        html += "Include links to projects or portfolios. "
-    if claim.get('verifiability_level') == 'low':
-        html += "Make the claim more specific and concrete."
-    
-    html += """
-        </div>
-    </div>
 </div>
 """
-    
+
     return html
 
 def generate_interview_guide_with_context(results: Dict) -> str:
     """Generate comprehensive interview guide with full context"""
-    
+
     html = """
 <div style="font-family: 'Segoe UI', Arial, sans-serif;">
 
@@ -564,244 +561,151 @@ def generate_interview_guide_with_context(results: Dict) -> str:
         claims=results.get('total_claims', 0),
         flags=results.get('total_red_flags', 0)
     )
-    
+
     # Priority verification areas
     html += """
 <h2>🔴 Priority Verification Areas</h2>
 <div style="background: #ffebee; border-left: 4px solid #f44336; padding: 15px; margin: 15px 0;">
 """
-    
+
     red_flags = results.get('red_flags', [])
 
-
-
-
-
-    
     if not red_flags:
         html += "<p>✅ No critical areas identified - proceed with standard behavioral interview</p>"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     else:
         for i, flag in enumerate(red_flags[:5], 1):
             html += f"""
 <div style="margin: 15px 0; padding: 15px; background: white; border-radius: 5px;">
     <h3>Priority #{i}: {flag.get('description', 'Issue')}</h3>
-    
+
     <div style="background: #f5f5f5; padding: 10px; margin: 10px 0; border-radius: 3px;">
         <strong>🎤 Primary Question:</strong><br>
         {flag.get('interview_probe', 'Can you provide more details about this?')}
     </div>
-    
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-        <div style="background: #fff9c4; padding: 10px; border-radius: 3px;">
-            <strong>👂 Listen For:</strong>
-            <ul style="margin: 5px 0;">
-                <li>Specific examples and details</li>
-                <li>Consistency with resume claims</li>
-                <li>Team vs. individual contribution</li>
-                <li>Timeline and context accuracy</li>
-            </ul>
-        </div>
-        
-        <div style="background: #ffccbc; padding: 10px; border-radius: 3px;">
-            <strong>🚩 Red Flags in Response:</strong>
-            <ul style="margin: 5px 0;">
-                <li>Vague or evasive answers</li>
-                <li>Inability to provide specifics</li>
-                <li>Contradictions with resume</li>
-                <li>Deflecting to team achievements only</li>
-            </ul>
-        </div>
-    </div>
-    
-    <div style="margin-top: 10px;">
-        <strong>📝 Follow-up Questions:</strong>
-        <ul style="margin: 5px 0;">
-            <li>What was your specific role vs. the team's?</li>
-            <li>What metrics did you use to measure success?</li>
-            <li>Who else was involved and can verify this?</li>
-        </ul>
-    </div>
 </div>
 """
-    
-    html += "</div>"
-    
-    # General verification questions
-    html += """
-<h2>✅ Standard Verification Questions</h2>
-<div style="background: #e8f5e9; border-left: 4px solid #4CAF50; padding: 15px; margin: 15px 0;">
-"""
-    
-    standard_questions = [
-        {
-            'question': "Walk me through your most complex technical challenge and how you solved it.",
-            'purpose': "Tests problem-solving depth and technical expertise",
-            'indicators': "Look for: Technical details, trade-offs considered, learning from failures"
-        },
-        {
-            'question': "How do you measure success in your role? Give specific examples.",
-            'purpose': "Verifies data-driven approach and metrics claims",
-            'indicators': "Look for: Specific KPIs, measurement methods, actual numbers"
-        },
-        {
-            'question': "Describe a time when a project didn't go as planned. What happened?",
-            'purpose': "Tests honesty and growth mindset",
-            'indicators': "Look for: Ownership of mistakes, lessons learned, improvement actions"
-        }
-    ]
-    
-    for q in standard_questions:
-        html += f"""
-<div style="margin: 10px 0; padding: 10px; background: white; border-radius: 5px;">
-    <p><strong>Q:</strong> {q['question']}</p>
-    <p><strong>Purpose:</strong> {q['purpose']}</p>
-    <p><strong>Key Indicators:</strong> {q['indicators']}</p>
-</div>
-"""
-    
+
     html += """
 </div>
-
-<h2>📊 Scoring Rubric</h2>
-<div style="background: #f5f5f5; padding: 15px; border-radius: 10px;">
-    <table style="width: 100%; border-collapse: collapse;">
-        <tr style="background: #e0e0e0;">
-            <th style="padding: 10px;">Criteria</th>
-            <th style="padding: 10px;">Excellent (3)</th>
-            <th style="padding: 10px;">Good (2)</th>
-            <th style="padding: 10px;">Poor (1)</th>
-        </tr>
-        <tr>
-            <td style="padding: 10px;"><strong>Specificity</strong></td>
-            <td style="padding: 10px;">Detailed examples with metrics</td>
-            <td style="padding: 10px;">Some details provided</td>
-            <td style="padding: 10px;">Vague or generic answers</td>
-        </tr>
-        <tr style="background: #f9f9f9;">
-            <td style="padding: 10px;"><strong>Consistency</strong></td>
-            <td style="padding: 10px;">Perfectly aligns with resume</td>
-            <td style="padding: 10px;">Minor discrepancies</td>
-            <td style="padding: 10px;">Major contradictions</td>
-        </tr>
-        <tr>
-            <td style="padding: 10px;"><strong>Technical Depth</strong></td>
-            <td style="padding: 10px;">Deep understanding shown</td>
-            <td style="padding: 10px;">Adequate knowledge</td>
-            <td style="padding: 10px;">Surface-level only</td>
-        </tr>
-        <tr style="background: #f9f9f9;">
-            <td style="padding: 10px;"><strong>Ownership</strong></td>
-            <td style="padding: 10px;">Clear individual contribution</td>
-            <td style="padding: 10px;">Some individual work</td>
-            <td style="padding: 10px;">Only team achievements</td>
-        </tr>
-    </table>
-</div>
-
 </div>
 """
-    
+
     return html
 
 def analyze_resume(
     file,
+    seniority_level: str,
+    strictness_level: str,
     deep_analysis: bool,
     progress=gr.Progress()
 ) -> Tuple[str, Any, Any, Any, Any, str, str, str, str]:
     """Main analysis function with enhanced outputs"""
     global current_session
-    
+
     if not current_session.get('initialized'):
+        return "❌ Please initialize session with API key first", None, None, None, None, "", "", "", ""
+
+    if file is None:
+        return "❌ Please upload a resume file", None, None, None, None, "", "", "", ""
+
+    try:
+        progress(0.0, desc="Initializing analysis...")
+
+        # Get file path
+        file_path = file.name if hasattr(file, 'name') else str(file)
+
+        # Initialize modules
+        gemini_client = current_session['gemini_client']
+        cv_parser = CVParser()
+        claim_extractor = ClaimExtractor(gemini_client)
+        evidence_validator = EvidenceValidator(gemini_client)
+        red_flag_detector = RedFlagDetector(gemini_client, strictness_level=strictness_level.lower())
+
+        progress(0.1, desc="Parsing resume...")
+        parsed_cv = cv_parser.parse(file_path)
+
+        progress(0.3, desc="Extracting claims...")
+        claims_result = claim_extractor.extract_claims(parsed_cv, seniority_level.lower())
+        claims = claims_result['claims']
+
+        if not claims:
+            return "⚠️ No claims found in resume. Please check the file format.", None, None, None, None, "", "", "", ""
+
+        progress(0.5, desc="Validating evidence...")
+        validation_result = evidence_validator.validate_evidence(
+            claims,
+            parsed_cv['raw_text'],
+            check_links=deep_analysis,
+            deep_repo_analysis=deep_analysis
+        )
+
+        progress(0.7, desc="Detecting red flags...")
+        red_flag_result = red_flag_detector.detect_red_flags(
+            {
+                'claims': claims,
+                'validations': validation_result['validations'],
+                'consistency_score': validation_result['consistency_score']
+            },
             seniority_level.lower()
         )
-        
+
         progress(0.8, desc="Generating comprehensive analysis...")
-        
+
         # Fix consistency score if over 100
         consistency_score = min(100, validation_result['consistency_score'] * 100)
-        
+
         # Compile comprehensive results
         analysis_results = {
             'parsed_cv': parsed_cv,
             'claims': claims,
+            'total_claims': len(claims),
+            'verified_claims': sum(1 for v in validation_result['validations'] if v.get('verification_status') == 'verified'),
+            'unverified_claims': sum(1 for v in validation_result['validations'] if v.get('verification_status') in ['unverified', 'red_flag']),
             'claim_metrics': claims_result['metrics'],
             'validations': validation_result['validations'],
-            'consistency_score': consistency_score,  # Fixed here
+            'consistency_score': consistency_score,
             'red_flags': red_flag_result['red_flags'],
+            'total_red_flags': len(red_flag_result['red_flags']),
             'credibility_score': red_flag_result['credibility_score'],
             'final_score': red_flag_result['final_score'],
-            'total_red_flags': len(red_flag_result['red_flags']),
+            'risk_assessment': red_flag_result['risk_assessment'],
             'recommendation': red_flag_result['summary']['recommendation'],
             'seniority_level': seniority_level,
-            'links_checked': len([c for c in claims if c.get('links_artifacts')]),
-            'structure_quality': 'Well-organized' if validation.get('completeness_score', 0) > 70 else 'Needs improvement',
+            'links_checked': sum(1 for c in claims if c.get('links_artifacts')),
+            'structure_quality': 'Well-organized',
             'analysis_timestamp': datetime.now().isoformat()
         }
-        
+
+        # Store for export
+        current_session['last_analysis'] = analysis_results
+
+        # Generate visualizations
+        progress(0.9, desc="Creating visualizations...")
+        try:
+            heatmap = EvidenceHeatmap()
+            heatmap_fig = heatmap.create_heatmap(claims, validation_result['validations'])
+            dashboard_fig = heatmap.create_credibility_dashboard(
                 {
                     'final': red_flag_result['final_score'],
                     'credibility': red_flag_result['credibility_score'],
-                    'consistency': consistency_score,  # Use fixed value
+                    'consistency': consistency_score,
                     'risk_level': red_flag_result['risk_assessment']
                 },
                 red_flag_result['red_flags']
+            )
+            distribution_fig = heatmap.create_claim_distribution_chart(claims)
+            validation_fig = heatmap.create_verification_status_chart(validation_result['validations'])
+        except Exception as e:
             logger.warning(f"Visualization failed: {e}")
             heatmap_fig = dashboard_fig = distribution_fig = validation_fig = None
-        
+
         # Generate comprehensive displays
         main_analysis = generate_comprehensive_analysis_display(analysis_results)
         claim_analysis = generate_enhanced_claim_analysis(claims, validation_result['validations'])
         interview_guide = generate_interview_guide_with_context(analysis_results)
 
-
-
-        
         progress(1.0, desc="Analysis complete!")
-        
+
         return (
             main_analysis,
             dashboard_fig,
@@ -813,110 +717,97 @@ def analyze_resume(
             claim_analysis,
             "✅ Analysis complete! Review the comprehensive breakdown above."
         )
-        
+
     except Exception as e:
         logger.error(f"Analysis failed: {traceback.format_exc()}")
         return f"❌ Analysis failed: {str(e)}", None, None, None, None, "", "", "", ""
 
-# ... [Export functions remain the same but with consistency score fix] ...
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def export_report(format_type: str):
     """Export report with fixed consistency score"""
     global current_session
-    
+
     if 'last_analysis' not in current_session:
-    
+        return None, "❌ No analysis available to export. Please analyze a resume first."
+
     try:
         results = current_session['last_analysis']
-        
+
         # Fix consistency score before export
         results['consistency_score'] = min(100, results.get('consistency_score', 0))
-        
+
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        
+
         if format_type == "HTML":
             html_content = generate_comprehensive_html_report(results)
 
-            
             temp_file = tempfile.NamedTemporaryFile(
                 mode='w',
+                delete=False,
+                suffix='.html',
+                prefix=f'resume_analysis_{timestamp}_'
+            )
+            temp_file.write(html_content)
+            temp_file.close()
+
             return temp_file.name, "✅ HTML report generated successfully!"
-            
+
         elif format_type == "JSON":
-
             json_content = json.dumps(results, indent=2, default=str)
-            
+
             temp_file = tempfile.NamedTemporaryFile(
+                mode='w',
+                delete=False,
+                suffix='.json',
+                prefix=f'resume_analysis_{timestamp}_'
+            )
+            temp_file.write(json_content)
+            temp_file.close()
+
             return temp_file.name, "✅ JSON export generated successfully!"
-            
+
         elif format_type == "CSV":
-
             claims_df = pd.DataFrame(results.get('claims', []))
-            
-            if not claims_df.empty:
 
+            if not claims_df.empty:
                 columns = ['claim_text', 'category', 'verifiability_level', 'evidence_present']
                 columns = [col for col in columns if col in claims_df.columns]
                 claims_df = claims_df[columns]
+
+            temp_file = tempfile.NamedTemporaryFile(
+                mode='w',
+                delete=False,
+                suffix='.csv',
+                prefix=f'resume_claims_{timestamp}_'
+            )
+            claims_df.to_csv(temp_file.name, index=False)
+            temp_file.close()
+
             return temp_file.name, "✅ CSV export generated successfully!"
-            
+
         elif format_type == "Interview Checklist":
             checklist = generate_professional_interview_checklist(results)
 
-            
             temp_file = tempfile.NamedTemporaryFile(
                 mode='w',
+                delete=False,
+                suffix='.txt',
+                prefix=f'interview_checklist_{timestamp}_'
+            )
+            temp_file.write(checklist)
+            temp_file.close()
+
+            return temp_file.name, "✅ Interview checklist generated successfully!"
+
+    except Exception as e:
         logger.error(f"Export failed: {traceback.format_exc()}")
         return None, f"❌ Export failed: {str(e)}"
 
 def generate_comprehensive_html_report(results: Dict) -> str:
     """Generate beautiful comprehensive HTML report"""
-    
+
     # Fix consistency score
     consistency_score = min(100, results.get('consistency_score', 0))
-    
+
     html = f"""
 <!DOCTYPE html>
 <html>
@@ -924,7 +815,7 @@ def generate_comprehensive_html_report(results: Dict) -> str:
     <title>Resume Verification Report - Professional Analysis</title>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ 
+        body {{
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             line-height: 1.6;
             color: #333;
@@ -955,10 +846,6 @@ def generate_comprehensive_html_report(results: Dict) -> str:
             border-radius: 10px;
             text-align: center;
             box-shadow: 0 5px 15px rgba(0,0,0,0.08);
-            transition: transform 0.3s;
-        }}
-        .score-card:hover {{
-            transform: translateY(-5px);
         }}
         .score-number {{
             font-size: 48px;
@@ -980,49 +867,6 @@ def generate_comprehensive_html_report(results: Dict) -> str:
             padding-bottom: 10px;
             margin-bottom: 20px;
         }}
-        .alert {{
-            padding: 15px;
-            margin: 15px 0;
-            border-radius: 5px;
-            border-left: 4px solid;
-        }}
-        .alert-success {{
-            background: #e8f5e9;
-            border-color: #4CAF50;
-        }}
-        .alert-warning {{
-            background: #fff3e0;
-            border-color: #FF9800;
-        }}
-        .alert-danger {{
-            background: #ffebee;
-            border-color: #f44336;
-        }}
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin: 20px 0;
-        }}
-        th {{
-            background: #667eea;
-            color: white;
-            padding: 12px;
-            text-align: left;
-        }}
-        td {{
-            padding: 12px;
-            border-bottom: 1px solid #e0e0e0;
-        }}
-        tr:hover {{
-            background: #f5f5f5;
-        }}
-        .claim-card {{
-            background: #f8f9fa;
-            padding: 15px;
-            margin: 10px 0;
-            border-radius: 5px;
-            border-left: 4px solid #667eea;
-        }}
         .footer {{
             text-align: center;
             padding: 20px;
@@ -1041,46 +885,17 @@ def generate_comprehensive_html_report(results: Dict) -> str:
                 <strong>Analysis Type:</strong> Comprehensive Multi-Factor Verification
             </p>
         </div>
-        
+
         <div class="score-grid">
             <div class="score-card">
                 <div class="score-number">{results.get('final_score', 0):.0f}</div>
                 <h3>Final Score</h3>
                 <p>Overall Assessment</p>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
             </div>
             <div class="score-card">
                 <div class="score-number">{results.get('credibility_score', 0):.0f}</div>
                 <h3>Credibility</h3>
                 <p>Evidence Strength</p>
-
-
-
-
-
-
-
-
-
-
-
-
             </div>
             <div class="score-card">
                 <div class="score-number">{consistency_score:.0f}</div>
@@ -1091,28 +906,22 @@ def generate_comprehensive_html_report(results: Dict) -> str:
                 <div class="score-number" style="font-size: 32px;">{results.get('risk_assessment', 'UNKNOWN').upper()}</div>
                 <h3>Risk Level</h3>
                 <p>Hiring Risk</p>
-
-
-
-
             </div>
         </div>
-        
+
         <div class="section">
             <h2>Executive Summary</h2>
             <p><strong>Recommendation:</strong> {results.get('recommendation', 'No recommendation available')}</p>
             <p style="margin-top: 10px;">
-                Based on analysis of <strong>{results.get('total_claims', 0)} claims</strong>, 
-                we found <strong>{results.get('verified_claims', 0)} verified</strong>, 
-                <strong>{results.get('unverified_claims', 0)} unverified</strong>, and 
+                Based on analysis of <strong>{results.get('total_claims', 0)} claims</strong>,
+                we found <strong>{results.get('verified_claims', 0)} verified</strong>,
+                <strong>{results.get('unverified_claims', 0)} unverified</strong>, and
                 <strong>{results.get('total_red_flags', 0)} red flags</strong>.
             </p>
         </div>
-        
-        {generate_html_detailed_analysis(results)}
-        
+
         <div class="footer">
-            <p>© 2024 Resume Verification System - Professional Edition</p>
+            <p>© 2025 Resume Verification System - Professional Edition</p>
             <p>This report is confidential and intended for hiring decisions only.</p>
         </div>
     </div>
@@ -1121,89 +930,11 @@ def generate_comprehensive_html_report(results: Dict) -> str:
 """
     return html
 
-def generate_html_detailed_analysis(results: Dict) -> str:
-    """Generate detailed analysis sections for HTML report"""
-    html = """
-<div class="section">
-    <h2>Detailed Analysis Factors</h2>
-    <table>
-        <tr>
-            <th>Factor</th>
-            <th>Result</th>
-            <th>Impact</th>
-        </tr>
-"""
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-    factors = [
-        ("Buzzword Density", f"{results.get('claim_metrics', {}).get('buzzword_density', 0)*100:.1f}%", 
-         "Low" if results.get('claim_metrics', {}).get('buzzword_density', 0) < 0.05 else "High"),
-        ("Claims with Metrics", f"{results.get('claim_metrics', {}).get('claims_with_metrics', 0)}/{results.get('total_claims', 0)}", 
-         "Positive" if results.get('claim_metrics', {}).get('claims_with_metrics', 0) > 5 else "Needs Improvement"),
-        ("Specificity Score", f"{results.get('claim_metrics', {}).get('specificity_score', 0)*100:.0f}%",
-         "Good" if results.get('claim_metrics', {}).get('specificity_score', 0) > 0.7 else "Low"),
-        ("Timeline Consistency", get_timeline_status(results), 
-         "✅ Passed" if "Consistent" in get_timeline_status(results) else "❌ Issues"),
-        ("Technology Timeline", get_tech_timeline_status(results),
-         "✅ Valid" if "Valid" in get_tech_timeline_status(results) else "❌ Issues")
-    ]
-    
-    for factor, result, impact in factors:
-        html += f"""
-        <tr>
-            <td>{factor}</td>
-            <td>{result}</td>
-            <td>{impact}</td>
-        </tr>
-"""
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-    html += """
-    </table>
-</div>
-"""
-    return html
-
 def generate_professional_interview_checklist(results: Dict) -> str:
     """Generate professional interview checklist"""
 
-    
     # Fix consistency score
     consistency_score = min(100, results.get('consistency_score', 0))
-
-
-
-
-
-    
-
-
-
 
     checklist = f"""
 ================================================================================
@@ -1231,54 +962,24 @@ Buzzword Density: {results.get('claim_metrics', {}).get('buzzword_density', 0)*1
 PRIORITY VERIFICATION POINTS
 ================================================================================
 """
-    
 
     for i, flag in enumerate(results.get('red_flags', [])[:10], 1):
         checklist += f"""
 {i}. [{flag.get('severity', '').upper()}] {flag.get('description', '')}
-   
+
    Primary Question: {flag.get('interview_probe', 'Verify this claim')}
-   
+
    Verification:
    □ Claim verified with specific examples
    □ Partial verification - needs follow-up
    □ Unable to verify - major concern
-   
+
    Notes: ________________________________________________________
    _____________________________________________________________
-   
+
 """
-    
+
     checklist += """
-BEHAVIORAL ASSESSMENT
-================================================================================
-
-
-Technical Competence
-□ Demonstrated deep understanding of claimed technologies
-□ Provided specific technical examples
-□ Explained trade-offs and decision-making
-□ Showed problem-solving approach
-
-Achievement Verification
-□ Metrics align with resume claims
-□ Individual contribution clearly defined
-□ Timeline consistent with resume
-□ References can verify achievements
-
-Communication & Integrity
-□ Answers were specific and detailed
-□ Acknowledged team contributions appropriately
-□ Consistent story throughout interview
-□ Comfortable with technical deep-dives
-
-DOCUMENT VERIFICATION
-================================================================================
-□ Portfolio/GitHub reviewed: _______________________________
-□ LinkedIn profile matches: ________________________________
-□ References contacted: ____________________________________
-□ Certifications verified: _________________________________
-
 FINAL RECOMMENDATION
 ================================================================================
 
@@ -1287,31 +988,17 @@ FINAL RECOMMENDATION
 □ RECOMMEND WITH RESERVATIONS - Some unresolved concerns
 □ DO NOT RECOMMEND - Significant credibility issues
 
-Justification:
-_________________________________________________________________
-_________________________________________________________________
-_________________________________________________________________
-_________________________________________________________________
-
-Interviewer: ______________________  Signature: _________________
-
-
-
-
-Date: _____________________________
-
-
-
+Interviewer: ______________________  Date: _____________________________
 
 ================================================================================
 """
-    
+
     return checklist
 
 # Create enhanced Gradio interface
 def create_interface():
     """Create professional Gradio interface with comprehensive features"""
-    
+
     custom_css = """
     .gradio-container {
         font-family: 'Segoe UI', Arial, sans-serif !important;
@@ -1325,56 +1012,65 @@ def create_interface():
         margin-bottom: 20px;
     }
     """
-    
+
     with gr.Blocks(title="Resume Verification System - Professional", theme=gr.themes.Soft(), css=custom_css) as app:
-        
+
         gr.HTML("""
         <div class="main-title">
             <h1>🔍 Resume Verification System - Professional Edition</h1>
             <p>Comprehensive AI-powered analysis with full transparency and interpretability</p>
         </div>
         """)
-        
+
         # Tab 1: Setup
         with gr.Tab("1️⃣ Setup & Configuration"):
             with gr.Row():
                 with gr.Column():
                     api_key_input = gr.Textbox(
-                        value=False
+                        label="Google AI API Key",
+                        type="password",
+                        placeholder="Enter your Gemini API key",
+                        info="Get your API key at https://makersuite.google.com/app/apikey"
                     )
-                    
+
+                    mock_mode = gr.Checkbox(
+                        label="Mock Mode (Testing)",
+                        value=False,
+                        visible=False
+                    )
+
                     init_button = gr.Button("Initialize Session", variant="primary", size="lg")
                     init_status = gr.Textbox(label="Status", interactive=False)
-                    
+
                 with gr.Column():
                     gr.Markdown("""
                     ### 🎯 What This System Analyzes
-                    
+
                     #### Document Quality
                     - Claim extraction and categorization
                     - Evidence strength assessment
                     - Buzzword density analysis
                     - Structural quality evaluation
-                    
+
                     #### Credibility Factors
                     - Direct evidence verification
                     - Cross-section validation
                     - Timeline consistency checks
                     - Technology timeline validation
-                    
+
                     #### Advanced Detection
                     - Role-achievement mismatches
                     - Sole credit detection
                     - Metric plausibility analysis
                     - Vagueness patterns
-                    
+
                     #### Risk Assessment
                     - Multi-factor scoring
                     - Seniority-adjusted thresholds
                     - Red flag prioritization
                     - Interview strategy generation
                     """)
-        
+
         # Tab 2: Analysis
         with gr.Tab("2️⃣ Resume Analysis"):
             with gr.Row():
@@ -1384,109 +1080,110 @@ def create_interface():
                         file_types=[".pdf", ".docx", ".txt"],
                         elem_id="file-upload"
                     )
-                    
+
                     seniority_dropdown = gr.Dropdown(
                         label="Seniority Level",
                         choices=["Intern", "Junior", "Mid", "Senior", "Lead"],
                         value="Mid",
                         info="Adjusts verification thresholds"
                     )
-                    
+
                     strictness_radio = gr.Radio(
                         label="Analysis Strictness",
                         choices=["Low", "Medium", "High"],
                         value="Medium",
                         info="Controls sensitivity of red flag detection"
                     )
-                    
+
                     deep_analysis = gr.Checkbox(
                         label="Enable Deep Analysis",
                         value=False,
                         info="Includes link checking and repository analysis (slower)"
                     )
-                    
+
                     analyze_button = gr.Button("🚀 Analyze Resume", variant="primary", size="lg")
-                    
+
                 with gr.Column(scale=2):
                     analysis_status = gr.Textbox(label="Status", interactive=False)
                     comprehensive_analysis = gr.Markdown(label="Comprehensive Analysis")
-        
+
         # Tab 3: Visualizations
         with gr.Tab("3️⃣ Visual Analytics"):
             with gr.Row():
                 dashboard_plot = gr.Plot(label="Credibility Dashboard")
             with gr.Row():
                 with gr.Column():
-                    distribution_plot = gr.Plot(label="Claim Distribution")
+                    heatmap_plot = gr.Plot(label="Evidence Heatmap")
                 with gr.Column():
-                    validation_plot = gr.Plot(label="Verification Summary")
-        
+                    distribution_plot = gr.Plot(label="Claim Distribution")
+            with gr.Row():
+                validation_plot = gr.Plot(label="Verification Summary")
+
         # Tab 4: Detailed Analysis
         with gr.Tab("4️⃣ Claim-by-Claim Analysis"):
             claim_analysis = gr.Markdown(label="Detailed Claim Analysis")
 
-
-
-
-
-
-        
         # Tab 5: Interview Strategy
         with gr.Tab("5️⃣ Interview Strategy"):
             interview_guide = gr.Markdown(label="Strategic Interview Guide")
-        
+
         # Tab 6: Export
         with gr.Tab("6️⃣ Export Reports"):
             with gr.Row():
                 with gr.Column():
                     gr.Markdown("""
                     ### 📄 Professional Export Options
-                    
+
                     Generate comprehensive reports with full analysis details.
                     """)
-                    
+
                     report_format = gr.Radio(
                         label="Report Format",
                         choices=["HTML", "JSON", "CSV", "Interview Checklist"],
                         value="HTML",
                         info="Choose export format"
                     )
-                    
+
                     download_button = gr.Button("📥 Generate Report", variant="primary", size="lg")
                     download_file = gr.File(label="Download Report", interactive=False)
                     export_status = gr.Textbox(label="Export Status", interactive=False)
-                    
+
                 with gr.Column():
                     gr.Markdown("""
                     ### 📊 Export Features
-                    
+
                     **HTML Report**
                     - Beautiful formatted report
                     - All scores and explanations
                     - Ready for sharing
-                    
+
                     **JSON Export**
                     - Complete analysis data
                     - Integration-ready format
                     - All metrics included
-                    
+
                     **CSV Export**
                     - Claims spreadsheet
                     - Easy data analysis
                     - Excel compatible
-                    
+
                     **Interview Checklist**
                     - Printable format
                     - Verification points
                     - Scoring rubric
                     """)
-        
+
         # Hidden components for unused outputs
         red_flags_hidden = gr.Markdown(visible=False)
-        
+
         # Event handlers
         init_button.click(
             fn=lambda key, mock: initialize_session(key, mock),
+            inputs=[api_key_input, mock_mode],
+            outputs=[init_status]
+        )
+
+        analyze_button.click(
             fn=analyze_resume,
             inputs=[file_input, seniority_dropdown, strictness_radio, deep_analysis],
             outputs=[
@@ -1496,8 +1193,27 @@ def create_interface():
                 distribution_plot,
                 validation_plot,
                 interview_guide,
-                red_flags_hidden,  # Not used, integrated into main analysis
+                red_flags_hidden,
                 claim_analysis,
                 analysis_status
             ]
         )
+
+        download_button.click(
+            fn=export_report,
+            inputs=[report_format],
+            outputs=[download_file, export_status]
+        )
+
+    return app
+
+# Launch the app
+if __name__ == "__main__":
+    logger.info("Starting Resume Verification System...")
+    app = create_interface()
+    app.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        share=False,
+        show_error=True
+    )
