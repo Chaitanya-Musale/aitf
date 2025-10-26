@@ -452,6 +452,9 @@ def get_check_status(results: Dict, check_type: str) -> str:
 def generate_enhanced_claim_analysis(claims: List[Dict], validations: List[Dict]) -> str:
     """Generate enhanced claim-by-claim analysis with better UI"""
 
+    if not claims:
+        return "<p>No claims found to analyze.</p>"
+
     html = """
 <div style="font-family: 'Segoe UI', Arial, sans-serif;">
 
@@ -463,14 +466,23 @@ def generate_enhanced_claim_analysis(claims: List[Dict], validations: List[Dict]
 
 """.format(total=len(claims))
 
+    # Create validation map by claim_id for proper matching
+    validation_map = {}
+    for val in validations:
+        claim_id = val.get('claim_id', '')
+        if claim_id:
+            validation_map[claim_id] = val
+
     # Group claims by category
     categories = {}
-    for i, claim in enumerate(claims[:20]):  # Limit to top 20
+    for claim in claims[:20]:  # Limit to top 20
         cat = claim.get('category', 'other')
         if cat not in categories:
             categories[cat] = []
 
-        validation = validations[i] if i < len(validations) else {}
+        # Get validation by claim_id
+        claim_id = claim.get('claim_id', '')
+        validation = validation_map.get(claim_id, {})
         categories[cat].append((claim, validation))
 
     # Display by category
@@ -546,6 +558,9 @@ def generate_single_claim_analysis(claim: Dict, validation: Dict) -> str:
 def generate_interview_guide_with_context(results: Dict) -> str:
     """Generate comprehensive interview guide with full context"""
 
+    if not results:
+        return "<p>No analysis results available yet. Please run an analysis first.</p>"
+
     html = """
 <div style="font-family: 'Segoe UI', Arial, sans-serif;">
 
@@ -574,19 +589,52 @@ def generate_interview_guide_with_context(results: Dict) -> str:
         html += "<p>✅ No critical areas identified - proceed with standard behavioral interview</p>"
     else:
         for i, flag in enumerate(red_flags[:5], 1):
+            description = flag.get('description', 'Issue detected')
+            probe = flag.get('interview_probe', 'Can you provide more details about this?')
+
             html += f"""
 <div style="margin: 15px 0; padding: 15px; background: white; border-radius: 5px;">
-    <h3>Priority #{i}: {flag.get('description', 'Issue')}</h3>
+    <h3>Priority #{i}: {description}</h3>
 
     <div style="background: #f5f5f5; padding: 10px; margin: 10px 0; border-radius: 3px;">
         <strong>🎤 Primary Question:</strong><br>
-        {flag.get('interview_probe', 'Can you provide more details about this?')}
+        {probe}
+    </div>
+
+    <div style="background: #e3f2fd; padding: 10px; margin: 10px 0; border-radius: 3px;">
+        <strong>💡 Follow-up Questions:</strong>
+        <ul style="margin: 5px 0;">
+            <li>Can you walk me through the specific details?</li>
+            <li>Who else was involved and what were their roles?</li>
+            <li>What evidence or documentation do you have?</li>
+        </ul>
     </div>
 </div>
 """
 
     html += """
 </div>
+
+<h2>✅ Standard Interview Questions</h2>
+<div style="background: #e8f5e9; border-left: 4px solid #4CAF50; padding: 15px; margin: 15px 0;">
+
+<div style="margin: 15px 0; padding: 15px; background: white; border-radius: 5px;">
+    <p><strong>Q1: Walk me through your most significant technical contribution.</strong></p>
+    <p style="color: #666; font-size: 0.9em;">Purpose: Verify depth of technical involvement and ownership</p>
+</div>
+
+<div style="margin: 15px 0; padding: 15px; background: white; border-radius: 5px;">
+    <p><strong>Q2: Describe a time when a project didn't go as planned. What happened?</strong></p>
+    <p style="color: #666; font-size: 0.9em;">Purpose: Test honesty and ability to learn from failures</p>
+</div>
+
+<div style="margin: 15px 0; padding: 15px; background: white; border-radius: 5px;">
+    <p><strong>Q3: How do you measure success in your role?</strong></p>
+    <p style="color: #666; font-size: 0.9em;">Purpose: Verify metrics-driven approach and claimed achievements</p>
+</div>
+
+</div>
+
 </div>
 """
 
@@ -683,7 +731,7 @@ def analyze_resume(
         progress(0.9, desc="Creating visualizations...")
         try:
             heatmap = EvidenceHeatmap()
-            heatmap_fig = heatmap.create_heatmap(claims, validation_result['validations'])
+            heatmap_fig = heatmap.create_evidence_heatmap(validation_result['validations'], claims)
             dashboard_fig = heatmap.create_credibility_dashboard(
                 {
                     'final': red_flag_result['final_score'],
@@ -693,8 +741,8 @@ def analyze_resume(
                 },
                 red_flag_result['red_flags']
             )
-            distribution_fig = heatmap.create_claim_distribution_chart(claims)
-            validation_fig = heatmap.create_verification_status_chart(validation_result['validations'])
+            distribution_fig = heatmap.create_claim_distribution(claims)
+            validation_fig = heatmap.create_validation_summary(validation_result['validations'], claims)
         except Exception as e:
             logger.warning(f"Visualization failed: {e}")
             heatmap_fig = dashboard_fig = distribution_fig = validation_fig = None
