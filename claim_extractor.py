@@ -163,33 +163,53 @@ class ClaimExtractor:
         
     def _detect_seniority_level(self, text: str) -> str:
         """
-        Auto-detect seniority level from CV text
+        Auto-detect seniority level from CV text with scoring
         """
         text_lower = text.lower()
-        
-        # Check for seniority markers in order of precedence
+
+        # Score each level (higher score = more evidence)
+        level_scores = {
+            'lead': 0,
+            'senior': 0,
+            'mid': 0,
+            'junior': 0,
+            'intern': 0
+        }
+
+        # Count occurrences with proper context (not just substring match)
         for level, markers in self.SENIORITY_MARKERS.items():
             for marker in markers:
-                if marker in text_lower:
-                    # Additional validation for context
-                    pattern = rf'\b{marker}\s+\w+\s+(engineer|developer|analyst|scientist|designer)'
-                    if re.search(pattern, text_lower):
-                        return level
-                        
-        # Check years of experience
+                # Must be in job title context
+                pattern = rf'\b{marker}\s+(engineer|developer|analyst|scientist|designer|architect|manager)'
+                matches = re.findall(pattern, text_lower)
+                level_scores[level] += len(matches)
+
+        # Check years of experience (higher weight)
         exp_pattern = r'(\d+)\+?\s*years?\s*(of)?\s*experience'
         exp_matches = re.findall(exp_pattern, text_lower)
-        
+
         if exp_matches:
             years = max(int(match[0]) for match in exp_matches)
-            if years >= 8:
-                return 'senior'
-            elif years >= 3:
-                return 'mid'
+            if years >= 10:
+                level_scores['lead'] += 3
+                level_scores['senior'] += 2
+            elif years >= 5:
+                level_scores['senior'] += 3
+            elif years >= 2:
+                level_scores['mid'] += 2
             elif years >= 1:
-                return 'junior'
-                
-        return 'mid'  # Default to mid-level
+                level_scores['junior'] += 2
+            else:
+                level_scores['intern'] += 1
+
+        # Return highest scored level
+        max_level = max(level_scores, key=level_scores.get)
+
+        # If all scores are 0, default to mid
+        if level_scores[max_level] == 0:
+            return 'mid'
+
+        return max_level
         
     def _extract_section_claims(self,
                                section_text: str,

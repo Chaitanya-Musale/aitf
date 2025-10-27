@@ -677,7 +677,20 @@ def analyze_resume(
         claims = claims_result['claims']
 
         if not claims:
-            return "⚠️ No claims found in resume. Please check the file format.", None, None, None, None, "", "", "", ""
+            # Diagnose why no claims found
+            resume_length = len(parsed_cv.get('raw_text', ''))
+            sections_found = list(parsed_cv.get('sections', {}).keys())
+
+            if resume_length < 100:
+                error_msg = "⚠️ Resume too short (< 100 words). Please upload a complete resume with work experience, projects, or skills."
+            elif len(sections_found) == 0:
+                error_msg = "⚠️ Could not parse resume structure. Please ensure the file is a valid PDF, DOCX, or TXT with clear sections."
+            elif sections_found == ['education'] or len(sections_found) == 1:
+                error_msg = f"⚠️ Only found {sections_found[0]} section. Please add:\n• Work experience\n• Projects\n• Skills\n• Achievements"
+            else:
+                error_msg = f"⚠️ No analyzable claims found. Sections detected: {', '.join(sections_found)}.\n\nEnsure resume includes specific achievements, not just responsibilities."
+
+            return error_msg, None, None, None, None, "", "", "", ""
 
         progress(0.5, desc="Validating evidence...")
         validation_result = evidence_validator.validate_evidence(
@@ -699,8 +712,25 @@ def analyze_resume(
 
         progress(0.8, desc="Generating comprehensive analysis...")
 
-        # Fix consistency score if over 100
-        consistency_score = min(100, validation_result['consistency_score'] * 100)
+        # Fix consistency score normalization (handle both 0-1 and 0-100 formats)
+        def normalize_score(score):
+            """Normalize score to 0-100 range"""
+            if score > 100:
+                # Score was mistakenly multiplied
+                return min(100, score / 100)
+            elif score <= 1:
+                # Score is in decimal format (0-1)
+                return score * 100
+            else:
+                # Score is already in 0-100 range
+                return min(100, score)
+
+        consistency_score = normalize_score(validation_result['consistency_score'])
+
+        # Round all scores to 1 decimal place for consistency
+        final_score = round(red_flag_result['final_score'], 1)
+        credibility_score = round(red_flag_result['credibility_score'], 1)
+        consistency_score = round(consistency_score, 1)
 
         # Compile comprehensive results
         analysis_results = {
@@ -714,8 +744,8 @@ def analyze_resume(
             'consistency_score': consistency_score,
             'red_flags': red_flag_result['red_flags'],
             'total_red_flags': len(red_flag_result['red_flags']),
-            'credibility_score': red_flag_result['credibility_score'],
-            'final_score': red_flag_result['final_score'],
+            'credibility_score': credibility_score,
+            'final_score': final_score,
             'risk_assessment': red_flag_result['risk_assessment'],
             'recommendation': red_flag_result['summary']['recommendation'],
             'seniority_level': seniority_level,
