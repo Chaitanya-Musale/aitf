@@ -43,13 +43,13 @@ class RedFlagDetector:
         'exclusively', 'entirely by myself', 'without assistance'
     ]
     
-    # Unrealistic metrics thresholds
+    # Unrealistic metrics thresholds (adjusted to be more realistic)
     METRIC_THRESHOLDS = {
         'percentage_increase': {
-            '1_month': 50,    # >50% in 1 month is suspicious
-            '3_months': 100,   # >100% in 3 months
-            '6_months': 200,   # >200% in 6 months
-            '12_months': 500   # >500% in 1 year
+            '1_month': 100,   # >100% in 1 month is suspicious (was 50)
+            '3_months': 200,  # >200% in 3 months (was 100)
+            '6_months': 400,  # >400% in 6 months (was 200)
+            '12_months': 800  # >800% in 1 year (was 500)
         },
         'user_growth': {
             'startup': 10000,  # >10k users for early startup
@@ -406,11 +406,11 @@ class RedFlagDetector:
         """
         claim_text = claim.get('claim_text', '')
         claim_text_lower = claim_text.lower()
-        
-        # Count buzzwords
-        buzzword_count = sum(1 for buzz in self.BUZZWORDS if buzz in claim_text_lower)
+
+        # Count buzzwords (count occurrences, not just presence)
+        buzzword_count = sum(claim_text_lower.count(buzz) for buzz in self.BUZZWORDS)
         word_count = len(claim_text.split())
-        
+
         if word_count > 0:
             buzzword_density = buzzword_count / word_count
             
@@ -446,19 +446,31 @@ class RedFlagDetector:
         """
         Check for patterns of over-claiming
         """
-        # Count "expert" level skills
+        # Count "expert" level skills (seniority-aware thresholds)
         if claim.get('category') == 'skill':
-            expert_skills = [c for c in all_claims 
-                           if c.get('category') == 'skill' and 
+            expert_skills = [c for c in all_claims
+                           if c.get('category') == 'skill' and
                            'expert' in c.get('claim_text', '').lower()]
-                           
-            if len(expert_skills) > 15:
+
+            # Seniority-aware thresholds
+            MAX_EXPERT_SKILLS = {
+                'intern': 2,
+                'junior': 5,
+                'mid': 10,
+                'senior': 20,
+                'lead': 30
+            }
+
+            seniority = claim.get('seniority_claim', 'mid')
+            threshold = MAX_EXPERT_SKILLS.get(seniority, 10)
+
+            if len(expert_skills) > threshold:
                 return {
                     'flag_id': f"expert_overflow_{claim['claim_id'][:8]}",
                     'severity': 'medium',
                     'category': 'overclaim',
                     'affected_claims': [c['claim_id'] for c in expert_skills],
-                    'description': f"{len(expert_skills)} expert-level skills claimed",
+                    'description': f"Claims {len(expert_skills)} expert-level skills (expected ≤{threshold} for {seniority} level)",
                     'interview_probe': "Which 3-5 technologies would you consider your strongest expertise?",
                     'requires_proof': False
                 }
@@ -525,10 +537,14 @@ class RedFlagDetector:
                 except:
                     pass
                     
-        # 2. Check validation consistency
-        unverified_count = sum(1 for v in validations 
+        # 2. Check for overlapping employment (full-time positions simultaneously)
+        overlap_flags = self._detect_employment_overlaps(work_claims)
+        flags.extend(overlap_flags)
+
+        # 3. Check validation consistency
+        unverified_count = sum(1 for v in validations
                              if v.get('verification_status') in ['unverified', 'red_flag'])
-                             
+
         if validations and unverified_count / len(validations) > 0.5:
             flags.append({
                 'flag_id': 'low_verification_rate',
@@ -539,23 +555,63 @@ class RedFlagDetector:
                 'interview_probe': "Can you provide references or portfolio examples for your key achievements?",
                 'requires_proof': True
             })
-            
+
         return flags
+
+    def _detect_employment_overlaps(self, work_claims: List[Dict]) -> List[Dict]:
+        """Detect overlapping employment periods"""
+        overlaps = []
+
+        for i, claim1 in enumerate(work_claims):
+            for j, claim2 in enumerate(work_claims[i+1:], start=i+1):
+                if self._periods_overlap(claim1, claim2):
+                    overlaps.append({
+                        'flag_id': f'overlap_{i}_{j}',
+                        'severity': 'medium',
+                        'category': 'timeline',
+                        'affected_claims': [claim1.get('claim_id', ''), claim2.get('claim_id', '')],
+                        'description': f"Overlapping employment periods detected",
+                        'interview_probe': "These positions overlap. Were both full-time? How did you manage both simultaneously?",
+                        'requires_proof': True
+                    })
+
+        return overlaps
+
+    def _periods_overlap(self, claim1: Dict, claim2: Dict) -> bool:
+        """Check if two employment periods overlap"""
+        try:
+            start1 = claim1.get('time_period', {}).get('start_date')
+            end1 = claim1.get('time_period', {}).get('end_date', '2099-12')
+            start2 = claim2.get('time_period', {}).get('start_date')
+            end2 = claim2.get('time_period', {}).get('end_date', '2099-12')
+
+            if not all([start1, start2]):
+                return False
+
+            # Convert to datetime
+            d_start1 = datetime.strptime(start1[:7], '%Y-%m')
+            d_end1 = datetime.strptime(end1[:7], '%Y-%m')
+            d_start2 = datetime.strptime(start2[:7], '%Y-%m')
+            d_end2 = datetime.strptime(end2[:7], '%Y-%m')
+
+            # Check overlap: positions overlap if start1 <= end2 AND start2 <= end1
+            return (d_start1 <= d_end2) and (d_start2 <= d_end1)
+        except:
+            return False
         
     def _calculate_month_gap(self, date1: str, date2: str) -> int:
         """
-        Calculate months between two dates
+        Calculate months between two dates accurately
         """
         try:
             # Parse dates (assuming YYYY-MM format)
             d1 = datetime.strptime(date1[:7], '%Y-%m')
             d2 = datetime.strptime(date2[:7], '%Y-%m')
-            
-            # Calculate difference
-            diff = d2 - d1
-            months = diff.days / 30
-            
-            return max(0, int(months))
+
+            # Accurate month calculation
+            diff = (d2.year - d1.year) * 12 + (d2.month - d1.month)
+
+            return max(0, diff)
         except:
             return 0
             
@@ -582,17 +638,29 @@ class RedFlagDetector:
                 all_flags.append(flag)
                 seen_descriptions.add(key)
                 
-        # Apply strictness multiplier
+        # Apply strictness multiplier properly
         multiplier = self.severity_multipliers.get(self.strictness_level, 1.0)
-        
+
+        severity_order = ['low', 'medium', 'high', 'critical']
+
         for flag in all_flags:
-            # Adjust severity based on strictness
-            if multiplier > 1.0 and flag['severity'] == 'low':
-                flag['severity'] = 'medium'
-            elif multiplier > 1.0 and flag['severity'] == 'medium':
-                flag['severity'] = 'high'
-            elif multiplier < 1.0 and flag['severity'] == 'high':
-                flag['severity'] = 'medium'
+            current_severity = flag.get('severity', 'medium')
+
+            # Skip if severity not recognized
+            if current_severity not in severity_order:
+                continue
+
+            current_index = severity_order.index(current_severity)
+
+            # Adjust based on multiplier
+            if multiplier > 1.0:  # High strictness
+                new_index = min(current_index + 1, len(severity_order) - 1)
+            elif multiplier < 1.0:  # Low strictness
+                new_index = max(current_index - 1, 0)
+            else:
+                new_index = current_index
+
+            flag['severity'] = severity_order[new_index]
                 
         return all_flags
         
@@ -641,11 +709,12 @@ class RedFlagDetector:
         # Start with base scores
         credibility_score = 100
         
-        # Deduct for red flags
+        # Deduct for red flags (with immediate bounds checking)
         for flag in flags:
             severity_deductions = SCORING_CONFIG['red_flag_severity_scores']
             deduction = severity_deductions.get(flag['severity'], 0)
             credibility_score += deduction  # Note: deductions are negative
+            credibility_score = max(0, credibility_score)  # Never go negative
             
         # Factor in validation scores
         validations = validated_claims.get('validations', [])
