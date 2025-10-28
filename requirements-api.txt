@@ -1,0 +1,29 @@
+# Flask API Requirements (No Gradio!)
+
+# Web Framework
+Flask==3.0.0
+flask-cors==4.0.0
+gunicorn==21.2.0  # For production deployment
+
+# AI/ML
+google-generativeai==0.3.2
+
+# PDF/Document Processing
+PyPDF2==3.0.1
+pdfplumber==0.10.3
+python-docx==1.1.0
+
+# Data Processing
+pandas==2.1.4
+numpy==1.26.2
+
+# Visualization (for charts if needed)
+plotly==5.18.0
+
+# Utilities
+python-dateutil==2.8.2
+requests==2.31.0
+
+# Optional: Better performance
+# python-magic==0.4.27  # File type detection
+# backoff==2.2.1  # Retry logic
